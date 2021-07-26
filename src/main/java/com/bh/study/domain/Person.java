@@ -1,35 +1,22 @@
 package com.bh.study.domain;
 
+import lombok.Data;
+
+import javax.persistence.Id;
+
+@Data
 public class Person {
 
+    @Id
+    private String id;
+
     private String firstName;
+
     private String lastName;
 
-    public Person() {}
+    private int age;
 
-    public Person(String firstName, String lastName) {
-        this.firstName = firstName;
-        this.lastName = lastName;
-    }
+    private String recvURL;
 
-    public String getFirstName() {
-        return firstName;
-    }
-
-    public void setFirstName(String firstName) {
-        this.firstName = firstName;
-    }
-
-    public String getLastName() {
-        return lastName;
-    }
-
-    public void setLastName(String lastName) {
-        this.lastName = lastName;
-    }
-
-    @Override
-    public String toString() {
-        return "firstName='" + firstName + ", lastName='" + lastName;
-    }
+    private String sendYn;
 }

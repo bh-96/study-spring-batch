@@ -3,93 +3,95 @@ package com.bh.study.config;
 import com.bh.study.domain.Person;
 import com.bh.study.job.JobCompletionNotificationListener;
 import com.bh.study.processor.PersonItemProcessor;
+import com.bh.study.repository.PersonRepository;
+import com.google.gson.Gson;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
-import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
-import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.configuration.annotation.*;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
-import org.springframework.batch.item.database.BeanPropertyItemSqlParameterSourceProvider;
-import org.springframework.batch.item.database.JdbcBatchItemWriter;
-import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
-import org.springframework.batch.item.file.FlatFileItemReader;
-import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
-import org.springframework.batch.item.file.mapping.BeanWrapperFieldSetMapper;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.batch.item.support.ListItemReader;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.web.client.RestTemplate;
 
-import javax.sql.DataSource;
-
-@Configuration          // 클래스를 Application Context 의 bean 정의 소스로 태그 지정
-@EnableBatchProcessing  // reader, processor, writer (Chunk) 를 정의한다.
+@Slf4j
+@Configuration
+@EnableBatchProcessing
 public class BatchConfiguration {
 
+    // Job 생성을 직관적이고 편리하게 도와주는 빌더
     public final JobBuilderFactory jobBuilderFactory;
     public final StepBuilderFactory stepBuilderFactory;
 
+    public final PersonRepository personRepository;
+    public final RestTemplate restTemplate;
+    public final Gson gson;
+
     @Autowired
-    public BatchConfiguration(JobBuilderFactory jobBuilderFactory, StepBuilderFactory stepBuilderFactory) {
+    public BatchConfiguration(JobBuilderFactory jobBuilderFactory, StepBuilderFactory stepBuilderFactory,
+                              PersonRepository personRepository, RestTemplate restTemplate, Gson gson) {
         this.jobBuilderFactory = jobBuilderFactory;
         this.stepBuilderFactory = stepBuilderFactory;
+        this.personRepository = personRepository;
+        this.restTemplate = restTemplate;
+        this.gson = gson;
     }
 
     /**
      * first chunk (입력, 프로세서 및 출력 정의)
+     *      - reader : ItemReader 생성, file 을 찾아 각 라인 항목을 Person 객체로 읽는다.
+     *      - processor : ItemProcessor 데이터 일괄 처리 작업을 위해 정의한 인스턴스를 생성한다.
+     *      - writer : ItemWriter 생성, @EnableBatchProcessing 에서 생성한 dataSource 의 복사본을 자동으로 가져온다.
      */
-    // reader : ItemReader 생성, file 을 찾아 각 라인 항목을 Person 객체로 읽는다.
+
     @Bean
-    public FlatFileItemReader<Person> reader() {
-        return new FlatFileItemReaderBuilder<Person>()
-                .name("personItemReader")
-                .resource(new ClassPathResource("sample-data.csv"))
-                .delimited()
-                .names(new String[]{"firstName", "lastName"})
-                .fieldSetMapper(new BeanWrapperFieldSetMapper<Person>() {{
-                    setTargetType(Person.class);
-                }})
-                .build();
+    @StepScope  // Step 의 실행시점에 해당 컴포넌트를 Spring Bean 으로 생성
+    public ListItemReader<Person> reader() {
+        /*  ItemReader 구현에 Repository 를 사용하는 경우
+            - ListItemReader: paging 지원 안됨
+            - RepositoryItemReader: paging 지원 (추천)
+         */
+        return new ListItemReader<>(personRepository.findAllByAgeAfter(5));
     }
 
-    // processor : PersonItemProcessor 데이터 일괄 처리 작업을 위해 정의한 인스턴스를 생성한다.
     @Bean
     public PersonItemProcessor processor() {
-        return new PersonItemProcessor();
+        return new PersonItemProcessor(restTemplate, gson);
     }
 
-    // writer : ItemWriter 생성, @EnableBatchProcessing 에서 생성한 dataSource 의 복사본을 자동으로 가져온다.
     @Bean
-    public JdbcBatchItemWriter<Person> writer(DataSource dataSource) {
-        return new JdbcBatchItemWriterBuilder<Person>()
-                .itemSqlParameterSourceProvider(new BeanPropertyItemSqlParameterSourceProvider<>())
-                .sql("INSERT INTO people (first_name, last_name) VALUES (:firstName, :lastName)")
-                .dataSource(dataSource)
-                .build();
+    public ItemWriter<Person> writer() {
+        return personRepository::saveAll;
     }
 
     /**
      * last chunk (실제 작업 구성 정의)
+     *      - Job : Job 은 배치 처리 과정을 하나의 단위로 만들어 포현한 객체
+     *      - Step : 각 단계에서는 reader, processor, writer 가 포함 될 수 있다.
      */
-    // Job : 단계별로 작성된다. (Step)
+
     @Bean
-    public Job importUserJob(JobCompletionNotificationListener listener, Step step1) {
-        return jobBuilderFactory.get("importUserJob")
-                .incrementer(new RunIdIncrementer())    // 디비를 사용하여 실행 상태를 유지하므로 incrementer 가 필요함
+    public Job importJob(JobCompletionNotificationListener listener, Step step1) {
+        return jobBuilderFactory.get("send-job")
+                .incrementer(new RunIdIncrementer())
                 .listener(listener)
-                .flow(step1)    // 각 단계를 나열
+                .flow(step1)     // 각 단계를 나열
                 .end()
                 .build();
     }
 
-    // Step : 각 단계에서는 reader, processor, writer 가 포함 될 수 있다.
     @Bean
-    public Step step1(JdbcBatchItemWriter<Person> writer) {
+    @JobScope   // Job 실행시점에 Bean 이 생성
+    public Step step1(ItemWriter<Person> writer) {
         return stepBuilderFactory.get("step1")
-                .<Person, Person> chunk(10)     // 한번에 쓸 데이터 양을 정의
+                .<Person, Person> chunk(5)  // 한번에 쓸 데이터 양을 정의
                 .reader(reader())
                 .processor(processor())
                 .writer(writer)
+                .allowStartIfComplete(true) // 이미 성공적으로 끝난 step 은 스킵하기 때문에 true 로 하면 항상 실행된다.
                 .build();
     }
 }
